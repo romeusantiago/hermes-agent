@@ -542,6 +542,10 @@ async def pty_ws(ws: WebSocket) -> None:
 async def gateway_ws(ws: WebSocket) -> None:
     if not await _close_unless_sidecar_allowed(ws):
         return
+    mode = ws.query_params.get("mode", "")
+    if mode not in ("", "read-only"):
+        await ws.close(code=4403)
+        return
     from tui_gateway.ws import handle_ws
 
     # The authenticated identity (ticket / internal credential) stamped by
@@ -551,6 +555,7 @@ async def gateway_ws(ws: WebSocket) -> None:
         ws,
         auth_identity=getattr(ws, "_hermes_auth_identity", None),
         subprotocol=getattr(ws, "_hermes_ws_subprotocol", None),
+        read_only=mode == "read-only",
     )
 
 

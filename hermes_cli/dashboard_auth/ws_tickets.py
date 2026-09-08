@@ -50,9 +50,7 @@ def consume_ticket(ticket: str) -> Dict[str, Any]:
     with _lock:
         entry = _tickets.pop(ticket, None)
         if entry is None:
-            # Truncated so misuse never logs the secret in full.
-            truncated = (ticket[:8] + "…") if ticket else "<empty>"
-            raise TicketInvalid(f"unknown ticket: {truncated}")
+            raise TicketInvalid("unknown ticket")
         expires_at, info = entry
         if expires_at < now:
             raise TicketInvalid("expired")

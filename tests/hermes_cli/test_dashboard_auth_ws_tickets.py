@@ -98,14 +98,14 @@ class TestTTL:
 
 
 class TestErrorMessages:
-    def test_unknown_ticket_error_truncates_value(self):
+    def test_unknown_ticket_error_omits_value(self):
         long_value = "a" * 100
         with pytest.raises(TicketInvalid) as exc_info:
             consume_ticket(long_value)
-        # Never log more than the first 8 chars of an opaque ticket.
+        # Opaque credentials are never safe to include, even as a prefix.
         message = str(exc_info.value)
         assert long_value not in message
-        assert long_value[:8] in message
+        assert long_value[:8] not in message
 
 
 # ---------------------------------------------------------------------------
