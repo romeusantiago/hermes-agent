@@ -20,11 +20,13 @@ class _FakeWebSocket:
         close_reason: str = "",
         fail_send_at: int | None = None,
         on_receive=None,
+        receive_error: Exception | None = None,
     ):
         self._frames = iter(frames)
         self._close_reason = close_reason
         self._fail_send_at = fail_send_at
         self._on_receive = on_receive
+        self._receive_error = receive_error
         self._send_count = 0
         self.client = SimpleNamespace(host="127.0.0.1", port=41337)
         self.scope = {}
@@ -42,6 +44,8 @@ class _FakeWebSocket:
         self.sent.append(json.loads(line))
 
     async def receive_text(self) -> str:
+        if self._receive_error is not None:
+            raise self._receive_error
         try:
             if self._on_receive is not None:
                 self._on_receive()
@@ -182,6 +186,17 @@ def test_ws_never_logs_client_controlled_values_in_normal_mode(monkeypatch, capl
     assert id_secret not in caplog.text
     assert method_secret not in caplog.text
     assert close_secret not in caplog.text
+
+
+def test_read_only_ws_never_logs_receive_exception_details(monkeypatch, caplog):
+    _patch_effects(monkeypatch)
+    secret = "RECEIVE-EXCEPTION-SECRET-SENTINEL"
+    ws = _FakeWebSocket([], receive_error=RuntimeError(secret))
+    caplog.set_level(logging.INFO, logger=ws_mod._log.name)
+
+    asyncio.run(ws_mod.handle_ws(ws, read_only=True))
+
+    assert secret not in caplog.text
 
 
 @pytest.mark.parametrize("marker_state", ["regular", "symlink", "swap"])

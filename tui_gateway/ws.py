@@ -338,7 +338,7 @@ async def handle_ws(
                 break
             except Exception:
                 disconnect_reason = "receive_failed"
-                _log.exception("ws receive failed peer=%s", peer)
+                _log.error("ws receive failed peer=%s", peer)
                 break
             line = raw.strip()
             if not line:
