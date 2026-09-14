@@ -540,11 +540,11 @@ async def pty_ws(ws: WebSocket) -> None:
 
 @router.websocket("/api/ws")
 async def gateway_ws(ws: WebSocket) -> None:
-    if not await _close_unless_sidecar_allowed(ws):
-        return
     mode = ws.query_params.get("mode", "")
     if mode not in ("", "read-only"):
         await ws.close(code=4403)
+        return
+    if not await _close_unless_sidecar_allowed(ws):
         return
     from tui_gateway.ws import handle_ws
 

@@ -42,15 +42,16 @@ def test_gateway_ws_propagates_explicit_read_only_mode(monkeypatch):
     assert observed == [True, False]
 
 
-def test_gateway_ws_rejects_unknown_mode_before_handler(monkeypatch):
-    called = False
+def test_gateway_ws_rejects_unknown_mode_before_authentication(monkeypatch):
+    auth_called = False
 
     async def allow(_ws):
+        nonlocal auth_called
+        auth_called = True
         return True
 
     async def fake_handle(_ws, **_kwargs):
-        nonlocal called
-        called = True
+        raise AssertionError("invalid mode reached handler")
 
     monkeypatch.setattr(chat_ws, "_close_unless_sidecar_allowed", allow)
     monkeypatch.setattr(ws_mod, "handle_ws", fake_handle)
@@ -58,5 +59,5 @@ def test_gateway_ws_rejects_unknown_mode_before_handler(monkeypatch):
 
     asyncio.run(chat_ws.gateway_ws(cast(Any, ws)))
 
-    assert called is False
+    assert auth_called is False
     assert ws.close_codes == [4403]
