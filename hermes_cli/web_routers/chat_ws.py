@@ -140,11 +140,11 @@ async def _close_unless_sidecar_allowed(ws: WebSocket) -> bool:
     if not _DASHBOARD_EMBEDDED_CHAT_ENABLED:
         await ws.close(code=4403)
         return False
-    if not _ws_auth_ok(ws):
-        await ws.close(code=4401)
-        return False
     if not _ws_request_is_allowed(ws):
         await ws.close(code=4403)
+        return False
+    if not _ws_auth_ok(ws):
+        await ws.close(code=4401)
         return False
     return True
 

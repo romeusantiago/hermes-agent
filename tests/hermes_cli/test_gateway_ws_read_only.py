@@ -61,3 +61,25 @@ def test_gateway_ws_rejects_unknown_mode_before_authentication(monkeypatch):
 
     assert auth_called is False
     assert ws.close_codes == [4403]
+
+
+def test_sidecar_gate_checks_request_boundary_before_consuming_auth(monkeypatch):
+    auth_called = False
+
+    def request_allowed(_ws):
+        return False
+
+    def auth_ok(_ws):
+        nonlocal auth_called
+        auth_called = True
+        raise AssertionError("auth must not consume a ticket after boundary rejection")
+
+    monkeypatch.setattr(chat_ws, "_DASHBOARD_EMBEDDED_CHAT_ENABLED", True)
+    monkeypatch.setattr(chat_ws, "_ws_request_is_allowed", request_allowed)
+    monkeypatch.setattr(chat_ws, "_ws_auth_ok", auth_ok)
+    ws = _FakeWebSocket({})
+
+    assert asyncio.run(chat_ws._close_unless_sidecar_allowed(cast(Any, ws))) is False
+
+    assert auth_called is False
+    assert ws.close_codes == [4403]
