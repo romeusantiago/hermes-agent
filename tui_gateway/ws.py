@@ -380,7 +380,7 @@ async def handle_ws(
                     )
                 else:
                     await _reply({"jsonrpc": "2.0", "result": {"ok": True}, "id": req_id}, "send_failed_after_heartbeat",
-                                 "ws heartbeat reply send failed peer=%s id=%s", peer, req_id)
+                                 "ws heartbeat reply send failed peer=%s", peer)
                 continue
             # dispatch() may schedule long handlers on the pool; it returns None then and the worker
             # writes the response itself via transport.write (a separate thread, so that is the safe
@@ -395,7 +395,7 @@ async def handle_ws(
                 continue
             if resp is not None:
                 await _reply(resp, "send_failed_after_response",
-                             "ws response send failed peer=%s id=%s method=%s", peer, req_id, req_method)
+                             "ws response send failed peer=%s", peer)
     except _SendFailed:
         pass
     finally:

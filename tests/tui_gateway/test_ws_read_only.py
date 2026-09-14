@@ -151,7 +151,7 @@ def test_ws_never_logs_client_controlled_values_in_normal_mode(monkeypatch, capl
     close_secret = "NORMAL-CLOSE-SECRET-SENTINEL"
 
     def crash(*_args, **_kwargs):
-        raise RuntimeError("synthetic dispatch failure")
+        raise RuntimeError("synthetic dispatch failure " + method_secret)
 
     monkeypatch.setattr(server, "dispatch", crash)
     ws = _FakeWebSocket(
@@ -164,6 +164,19 @@ def test_ws_never_logs_client_controlled_values_in_normal_mode(monkeypatch, capl
     caplog.set_level(logging.INFO, logger=ws_mod._log.name)
 
     asyncio.run(ws_mod.handle_ws(ws))
+
+    ping_fail_ws = _FakeWebSocket(
+        [json.dumps({"jsonrpc": "2.0", "id": id_secret, "method": "gateway.ping", "params": {}})],
+        fail_send_at=2,
+    )
+    asyncio.run(ws_mod.handle_ws(ping_fail_ws))
+
+    monkeypatch.setattr(server, "dispatch", lambda *_args, **_kwargs: {"jsonrpc": "2.0", "result": {"ok": True}})
+    response_fail_ws = _FakeWebSocket(
+        [json.dumps({"jsonrpc": "2.0", "id": id_secret, "method": method_secret, "params": {}})],
+        fail_send_at=2,
+    )
+    asyncio.run(ws_mod.handle_ws(response_fail_ws))
 
     assert payload_secret not in caplog.text
     assert id_secret not in caplog.text
