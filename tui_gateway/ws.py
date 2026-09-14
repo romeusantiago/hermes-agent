@@ -314,9 +314,10 @@ async def handle_ws(
         # Cross-backend liveness: a heartbeat row lets the startup orphan sweep tell "live but idle
         # backend" from "truly orphaned". Idempotent and once-per-process, like the orphan sweep (the
         # desktop app and web dashboard reach the agent via this sidecar, not entry.main()).
-        starters = [(server._start_backend_heartbeat_refresher, "backend heartbeat refresher start")]
-        if not read_only:
-            starters.append((server._schedule_startup_orphan_sweep, "startup orphan sweep scheduling"))
+        starters = [] if read_only else [
+            (server._start_backend_heartbeat_refresher, "backend heartbeat refresher start"),
+            (server._schedule_startup_orphan_sweep, "startup orphan sweep scheduling"),
+        ]
         for start, what in starters:
             try:
                 start()

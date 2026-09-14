@@ -111,7 +111,7 @@ def test_read_only_ws_allows_only_exact_ping_and_skips_mutating_lifecycle(monkey
     assert ws.sent[1] == {"jsonrpc": "2.0", "result": {"ok": True}, "id": "ping-1"}
     assert ws.sent[2]["error"] == {"code": -32601, "message": "method not allowed"}
     assert ws.sent[3]["error"] == {"code": -32600, "message": "invalid request"}
-    assert effects == ["resolve_skin", "backend_heartbeat"]
+    assert effects == ["resolve_skin"]
 
 
 def test_read_only_ws_never_logs_client_controlled_values(monkeypatch, caplog):
