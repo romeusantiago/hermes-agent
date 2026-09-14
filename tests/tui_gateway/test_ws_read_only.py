@@ -143,6 +143,34 @@ def test_read_only_ws_never_logs_client_controlled_values(monkeypatch, caplog):
     assert send_secret not in caplog.text
 
 
+def test_ws_never_logs_client_controlled_values_in_normal_mode(monkeypatch, caplog):
+    _patch_effects(monkeypatch)
+    payload_secret = "NORMAL-PAYLOAD-SECRET-SENTINEL"
+    id_secret = "NORMAL-ID-SECRET-SENTINEL"
+    method_secret = "NORMAL-METHOD-SECRET-SENTINEL"
+    close_secret = "NORMAL-CLOSE-SECRET-SENTINEL"
+
+    def crash(*_args, **_kwargs):
+        raise RuntimeError("synthetic dispatch failure")
+
+    monkeypatch.setattr(server, "dispatch", crash)
+    ws = _FakeWebSocket(
+        [
+            '{"broken":"' + payload_secret + '"',
+            json.dumps({"jsonrpc": "2.0", "id": id_secret, "method": method_secret, "params": {}}),
+        ],
+        close_reason=close_secret,
+    )
+    caplog.set_level(logging.INFO, logger=ws_mod._log.name)
+
+    asyncio.run(ws_mod.handle_ws(ws))
+
+    assert payload_secret not in caplog.text
+    assert id_secret not in caplog.text
+    assert method_secret not in caplog.text
+    assert close_secret not in caplog.text
+
+
 @pytest.mark.parametrize("marker_state", ["regular", "symlink", "swap"])
 def test_read_only_ws_never_touches_dashboard_marker(monkeypatch, tmp_path, marker_state):
     effects = _patch_effects(monkeypatch)

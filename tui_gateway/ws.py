@@ -58,8 +58,6 @@ def _sanitize_ws_text(text: str) -> str:
 # Max seconds a pool-dispatched handler blocks waiting for the loop to flush a WS frame before we
 # give up waiting (the transport is NOT marked dead).
 _WS_WRITE_TIMEOUT_S = 10.0
-_WS_LOG_PAYLOAD_PREVIEW = 240
-
 # Per-token streaming frames are coalesced: buffered and flushed as a batch on a short timer instead
 # of waking the loop once per token (each wakeup competes with the agent turn for the GIL). Keep this
 # set to genuinely high-frequency, display-only events — anything a client must see promptly
@@ -141,7 +139,7 @@ class WSTransport:
             return not self._closed
         except Exception as exc:
             self._closed = True
-            _log.warning("ws write failed peer=%s error_type=%s error=%s", self._peer, type(exc).__name__, exc)
+            _log.warning("ws write failed peer=%s error_type=%s", self._peer, type(exc).__name__)
             return False
 
     def _arm_token_flush(self) -> None:  # loop thread
@@ -186,12 +184,12 @@ class WSTransport:
                     await self._ws.send_text(payload)
                 except UnicodeEncodeError as exc:
                     # A single illegal UTF-8 frame (lone surrogate) must not tear down the socket.
-                    _log.warning("ws send skipped invalid utf-8 frame peer=%s error=%s", self._peer, exc)
+                    _log.warning("ws send skipped invalid utf-8 frame peer=%s error_type=%s", self._peer, type(exc).__name__)
                     continue
                 except Exception as exc:
                     # Latch while holding the writer lock so queued batches observe the failure first.
                     self._closed = True
-                    _log.warning("ws send failed peer=%s error_type=%s error=%s", self._peer, type(exc).__name__, exc)
+                    _log.warning("ws send failed peer=%s error_type=%s", self._peer, type(exc).__name__)
                     return
 
     def close(self) -> None:  # loop thread (handle_ws finally), so the TimerHandle is safe
@@ -229,7 +227,7 @@ def _disable_nagle(ws: Any) -> None:
             elif hasattr(socket, "TCP_KEEPALIVE"):  # macOS idle seconds
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPALIVE, 30)
     except Exception as exc:  # pragma: no cover - best-effort tuning
-        _log.debug("ws TCP_NODELAY skip: %s", exc)
+        _log.debug("ws TCP_NODELAY skip error_type=%s", type(exc).__name__)
 
 
 class _SendFailed(Exception):
@@ -336,11 +334,7 @@ async def handle_ws(
                     _note_dashboard_client_activity()
             except _WebSocketDisconnect as exc:
                 code = getattr(exc, "code", None)
-                disconnect_reason = (
-                    f"client_disconnect(code={code})"
-                    if read_only
-                    else f"client_disconnect(code={code},reason={getattr(exc, 'reason', None)})"
-                )
+                disconnect_reason = f"client_disconnect(code={code})"
                 break
             except Exception:
                 disconnect_reason = "receive_failed"
@@ -354,10 +348,12 @@ async def handle_ws(
                 req = json.loads(line)
             except json.JSONDecodeError as exc:
                 parse_errors += 1
-                if read_only:
-                    _log.warning("ws parse error peer=%s index=%d", peer, messages)
-                else:
-                    _log.warning("ws parse error peer=%s index=%d error=%s payload=%r", peer, messages, exc, line[:_WS_LOG_PAYLOAD_PREVIEW])
+                _log.warning(
+                    "ws parse error peer=%s index=%d error_type=%s",
+                    peer,
+                    messages,
+                    type(exc).__name__,
+                )
                 await _reply(_error(-32700, "parse error", None), "send_failed_after_parse_error",
                              "ws parse-error reply send failed peer=%s", peer)
                 continue
@@ -393,9 +389,9 @@ async def handle_ws(
                 resp = await asyncio.to_thread(server.dispatch, req, transport)
             except Exception:
                 dispatch_crashes += 1
-                _log.exception("ws dispatch crash peer=%s id=%s method=%s", peer, req_id, req_method)
+                _log.error("ws dispatch crash peer=%s", peer)
                 await _reply(_error(-32603, "internal error", req_id), "send_failed_after_dispatch_crash",
-                             "ws dispatch-crash reply send failed peer=%s id=%s method=%s", peer, req_id, req_method)
+                             "ws dispatch-crash reply send failed peer=%s", peer)
                 continue
             if resp is not None:
                 await _reply(resp, "send_failed_after_response",
@@ -435,7 +431,7 @@ async def handle_ws(
         try:
             await ws.close()
         except Exception as exc:
-            _log.debug("ws close failed peer=%s error=%s", peer, exc)
+            _log.debug("ws close failed peer=%s error_type=%s", peer, type(exc).__name__)
         _log.info(
             "ws closed peer=%s reason=%s messages=%d parse_errors=%d "
             "dispatch_crashes=%d send_failures=%d reaped_sessions=%d detached_sessions=%d",
