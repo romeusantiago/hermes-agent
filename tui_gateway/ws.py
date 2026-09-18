@@ -58,8 +58,6 @@ def _sanitize_ws_text(text: str) -> str:
 # Max seconds a pool-dispatched handler blocks waiting for the loop to flush a WS frame before we
 # give up waiting (the transport is NOT marked dead).
 _WS_WRITE_TIMEOUT_S = 10.0
-_WS_LOG_PAYLOAD_PREVIEW = 240
-
 # Per-token streaming frames are coalesced: buffered and flushed as a batch on a short timer instead
 # of waking the loop once per token (each wakeup competes with the agent turn for the GIL). Keep this
 # set to genuinely high-frequency, display-only events — anything a client must see promptly
@@ -141,7 +139,7 @@ class WSTransport:
             return not self._closed
         except Exception as exc:
             self._closed = True
-            _log.warning("ws write failed peer=%s error_type=%s error=%s", self._peer, type(exc).__name__, exc)
+            _log.warning("ws write failed peer=%s error_type=%s", self._peer, type(exc).__name__)
             return False
 
     def _arm_token_flush(self) -> None:  # loop thread
@@ -186,12 +184,12 @@ class WSTransport:
                     await self._ws.send_text(payload)
                 except UnicodeEncodeError as exc:
                     # A single illegal UTF-8 frame (lone surrogate) must not tear down the socket.
-                    _log.warning("ws send skipped invalid utf-8 frame peer=%s error=%s", self._peer, exc)
+                    _log.warning("ws send skipped invalid utf-8 frame peer=%s error_type=%s", self._peer, type(exc).__name__)
                     continue
                 except Exception as exc:
                     # Latch while holding the writer lock so queued batches observe the failure first.
                     self._closed = True
-                    _log.warning("ws send failed peer=%s error_type=%s error=%s", self._peer, type(exc).__name__, exc)
+                    _log.warning("ws send failed peer=%s error_type=%s", self._peer, type(exc).__name__)
                     return
 
     def close(self) -> None:  # loop thread (handle_ws finally), so the TimerHandle is safe
@@ -229,14 +227,38 @@ def _disable_nagle(ws: Any) -> None:
             elif hasattr(socket, "TCP_KEEPALIVE"):  # macOS idle seconds
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPALIVE, 30)
     except Exception as exc:  # pragma: no cover - best-effort tuning
-        _log.debug("ws TCP_NODELAY skip: %s", exc)
+        _log.debug("ws TCP_NODELAY skip error_type=%s", type(exc).__name__)
 
 
 class _SendFailed(Exception):
     """Raised by handle_ws._reply when a reply could not be written: ends the read loop."""
 
 
-async def handle_ws(ws: Any, *, auth_identity: dict | None = None, subprotocol: str | None = None) -> None:
+def _read_only_request_error(req: Any) -> tuple[int, str, Any] | None:
+    if not isinstance(req, dict):
+        return -32600, "invalid request", None
+    req_id = req.get("id") if isinstance(req.get("id"), str) else None
+    method = req.get("method")
+    if isinstance(method, str) and method != "gateway.ping":
+        return -32601, "method not allowed", req_id
+    if (
+        set(req) != {"jsonrpc", "id", "method", "params"}
+        or req.get("jsonrpc") != "2.0"
+        or not req_id
+        or method != "gateway.ping"
+        or req.get("params") != {}
+    ):
+        return -32600, "invalid request", req_id
+    return None
+
+
+async def handle_ws(
+    ws: Any,
+    *,
+    auth_identity: dict | None = None,
+    subprotocol: str | None = None,
+    read_only: bool = False,
+) -> None:
     """Run one WebSocket session. Wire-compatible with ``tui_gateway.entry``. *auth_identity* is the server-minted
     ``{user_id, provider}`` recorded at WS-upgrade auth, stored as ``WSTransport.auth_identity`` (the only identity
     authority for browser-controller registration); callers that omit it (harnesses, embedded TUI child) get None."""
@@ -259,8 +281,9 @@ async def handle_ws(ws: Any, *, auth_identity: dict | None = None, subprotocol: 
     try:
         await (ws.accept(subprotocol=subprotocol) if subprotocol else ws.accept())
         disconnect_reason = "connected"
-        # Mark the client attached before the (possibly slow) ready/skin setup so scale-to-zero sees it.
-        _note_dashboard_client_activity(force=True)
+        # Read-only clients cannot touch the filesystem-backed dashboard marker.
+        if not read_only:
+            _note_dashboard_client_activity(force=True)
         _disable_nagle(ws)
         _log.info("ws accepted peer=%s", peer)
         transport = WSTransport(ws, asyncio.get_running_loop(), peer=peer, auth_identity=auth_identity)
@@ -269,13 +292,19 @@ async def handle_ws(ws: Any, *, auth_identity: dict | None = None, subprotocol: 
         # change_events: this backend broadcasts pet/cron/sessions.changed, so clients can demote legacy
         # polls to backstops. replay_epoch lets reconnecting clients detect a backend restart and reset
         # their per-session seq watermarks (event_replay).
+        ready_payload = {
+            "skin": skin_payload,
+            "change_events": not read_only,
+            "heartbeat": True,
+            "replay_epoch": replay_epoch(),
+        }
+        if read_only:
+            ready_payload["read_only"] = True
         ready_ok = await transport.write_async({
             "jsonrpc": "2.0", "method": "event",
-            "params": {"type": "gateway.ready", "payload": {
-                "skin": skin_payload, "change_events": True, "heartbeat": True, "replay_epoch": replay_epoch(),
-            }},
+            "params": {"type": "gateway.ready", "payload": ready_payload},
         })
-        if ready_ok:
+        if ready_ok and not read_only:
             # Live-apply skins Hermes activates mid-conversation, and track this peer for session-less
             # global broadcasts write_json can't route.
             server._ensure_skin_watcher()
@@ -283,10 +312,11 @@ async def handle_ws(ws: Any, *, auth_identity: dict | None = None, subprotocol: 
         # Cross-backend liveness: a heartbeat row lets the startup orphan sweep tell "live but idle
         # backend" from "truly orphaned". Idempotent and once-per-process, like the orphan sweep (the
         # desktop app and web dashboard reach the agent via this sidecar, not entry.main()).
-        for start, what in (
+        starters = [] if read_only else [
             (server._start_backend_heartbeat_refresher, "backend heartbeat refresher start"),
             (server._schedule_startup_orphan_sweep, "startup orphan sweep scheduling"),
-        ):
+        ]
+        for start, what in starters:
             try:
                 start()
             except Exception:
@@ -300,13 +330,15 @@ async def handle_ws(ws: Any, *, auth_identity: dict | None = None, subprotocol: 
         while True:
             try:
                 raw = await ws.receive_text()
-                _note_dashboard_client_activity()
+                if not read_only:
+                    _note_dashboard_client_activity()
             except _WebSocketDisconnect as exc:
-                disconnect_reason = f"client_disconnect(code={getattr(exc, 'code', None)},reason={getattr(exc, 'reason', None)})"
+                code = getattr(exc, "code", None)
+                disconnect_reason = f"client_disconnect(code={code})"
                 break
             except Exception:
                 disconnect_reason = "receive_failed"
-                _log.exception("ws receive failed peer=%s", peer)
+                _log.error("ws receive failed peer=%s", peer)
                 break
             line = raw.strip()
             if not line:
@@ -316,15 +348,39 @@ async def handle_ws(ws: Any, *, auth_identity: dict | None = None, subprotocol: 
                 req = json.loads(line)
             except json.JSONDecodeError as exc:
                 parse_errors += 1
-                _log.warning("ws parse error peer=%s index=%d error=%s payload=%r", peer, messages, exc, line[:_WS_LOG_PAYLOAD_PREVIEW])
+                _log.warning(
+                    "ws parse error peer=%s index=%d error_type=%s",
+                    peer,
+                    messages,
+                    type(exc).__name__,
+                )
                 await _reply(_error(-32700, "parse error", None), "send_failed_after_parse_error",
                              "ws parse-error reply send failed peer=%s", peer)
                 continue
             req_id = req.get("id") if isinstance(req, dict) else None
             req_method = req.get("method") if isinstance(req, dict) else None
+            if read_only:
+                error = _read_only_request_error(req)
+                if error is not None:
+                    code, message, safe_req_id = error
+                    await _reply(
+                        _error(code, message, safe_req_id),
+                        "send_failed_after_read_only_rejection",
+                        "ws read-only rejection reply send failed peer=%s",
+                        peer,
+                    )
+                    continue
             if req_method == "gateway.ping":
-                await _reply({"jsonrpc": "2.0", "result": {"ok": True}, "id": req_id}, "send_failed_after_heartbeat",
-                             "ws heartbeat reply send failed peer=%s id=%s", peer, req_id)
+                if read_only:
+                    await _reply(
+                        {"jsonrpc": "2.0", "result": {"ok": True}, "id": req_id},
+                        "send_failed_after_heartbeat",
+                        "ws heartbeat reply send failed peer=%s",
+                        peer,
+                    )
+                else:
+                    await _reply({"jsonrpc": "2.0", "result": {"ok": True}, "id": req_id}, "send_failed_after_heartbeat",
+                                 "ws heartbeat reply send failed peer=%s", peer)
                 continue
             # dispatch() may schedule long handlers on the pool; it returns None then and the worker
             # writes the response itself via transport.write (a separate thread, so that is the safe
@@ -333,46 +389,49 @@ async def handle_ws(ws: Any, *, auth_identity: dict | None = None, subprotocol: 
                 resp = await asyncio.to_thread(server.dispatch, req, transport)
             except Exception:
                 dispatch_crashes += 1
-                _log.exception("ws dispatch crash peer=%s id=%s method=%s", peer, req_id, req_method)
+                _log.error("ws dispatch crash peer=%s", peer)
                 await _reply(_error(-32603, "internal error", req_id), "send_failed_after_dispatch_crash",
-                             "ws dispatch-crash reply send failed peer=%s id=%s method=%s", peer, req_id, req_method)
+                             "ws dispatch-crash reply send failed peer=%s", peer)
                 continue
             if resp is not None:
                 await _reply(resp, "send_failed_after_response",
-                             "ws response send failed peer=%s id=%s method=%s", peer, req_id, req_method)
+                             "ws response send failed peer=%s", peer)
     except _SendFailed:
         pass
     finally:
         reaped_sessions = detached_sessions = 0
         if transport is not None:
-            server.unregister_live_transport(transport)
-            # Owner-safely park browser controllers this transport registered (a same-identity reconnect may
-            # deliver a terminal result for in-flight work). Offloaded: disconnect takes the controller's
-            # send_lock, which a worker-thread dispatch may hold while blocking on THIS loop to transmit.
-            try:
-                from gateway.browser_control_broker import get_browser_control_broker
-                await asyncio.to_thread(get_browser_control_broker().disconnect_owner, transport)
-            except Exception:
-                _log.exception("ws browser-controller disconnect failed peer=%s", peer)
-            transport.close()
-            try:
-                await asyncio.to_thread(server._release_wake_for_transport, transport)
-            except Exception:
-                _log.exception("ws wake-word teardown failed peer=%s", peer)
-            # The single WS-disconnect teardown path: reap sessions this transport owned (close_on_disconnect
-            # sidecars) or detach the rest to the drop sentinel so later emits don't hit a closed socket; detached
-            # ones go to the grace-windowed orphan reaper (a quick resume cancels it). Offloaded: worker.close()
-            # blocks (terminate + waits) plus a sync DB write, which inline would freeze the loop for every peer.
-            try:
-                reaped_sessions, detached_sessions = await asyncio.to_thread(
-                    server._close_sessions_for_transport, transport, end_reason="ws_disconnect"
-                )
-            except Exception:
-                _log.exception("ws transport teardown failed peer=%s", peer)
+            if read_only:
+                transport.close()
+            else:
+                server.unregister_live_transport(transport)
+                # Owner-safely park browser controllers this transport registered (a same-identity reconnect may
+                # deliver a terminal result for in-flight work). Offloaded: disconnect takes the controller's
+                # send_lock, which a worker-thread dispatch may hold while blocking on THIS loop to transmit.
+                try:
+                    from gateway.browser_control_broker import get_browser_control_broker
+                    await asyncio.to_thread(get_browser_control_broker().disconnect_owner, transport)
+                except Exception:
+                    _log.exception("ws browser-controller disconnect failed peer=%s", peer)
+                transport.close()
+                try:
+                    await asyncio.to_thread(server._release_wake_for_transport, transport)
+                except Exception:
+                    _log.exception("ws wake-word teardown failed peer=%s", peer)
+                # The single WS-disconnect teardown path: reap sessions this transport owned (close_on_disconnect
+                # sidecars) or detach the rest to the drop sentinel so later emits don't hit a closed socket; detached
+                # ones go to the grace-windowed orphan reaper (a quick resume cancels it). Offloaded: worker.close()
+                # blocks (terminate + waits) plus a sync DB write, which inline would freeze the loop for every peer.
+                try:
+                    reaped_sessions, detached_sessions = await asyncio.to_thread(
+                        server._close_sessions_for_transport, transport, end_reason="ws_disconnect"
+                    )
+                except Exception:
+                    _log.exception("ws transport teardown failed peer=%s", peer)
         try:
             await ws.close()
         except Exception as exc:
-            _log.debug("ws close failed peer=%s error=%s", peer, exc)
+            _log.debug("ws close failed peer=%s error_type=%s", peer, type(exc).__name__)
         _log.info(
             "ws closed peer=%s reason=%s messages=%d parse_errors=%d "
             "dispatch_crashes=%d send_failures=%d reaped_sessions=%d detached_sessions=%d",

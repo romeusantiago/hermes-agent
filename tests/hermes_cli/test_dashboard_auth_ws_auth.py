@@ -278,17 +278,16 @@ class TestWsAuthOkGated:
         if hasattr(audit_mod, "_LOGGER"):
             monkeypatch.setattr(audit_mod, "_LOGGER", None, raising=False)
 
-        ws = _fake_ws(query={"ticket": "never-minted"})
+        ticket = "never-minted-sensitive-ticket"
+        ws = _fake_ws(query={"ticket": ticket})
         assert _web_server_chat._ws_auth_ok(ws) is False
 
         log_file = tmp_path / "logs" / "dashboard-auth.log"
-        # The audit module may write asynchronously through stdlib logging,
-        # but flush is synchronous. If the file doesn't exist yet, the
-        # logger may not have been initialized in this process — that's
-        # acceptable as long as the rejection path didn't crash.
-        if log_file.exists():
-            content = log_file.read_text()
-            assert "ws_ticket_rejected" in content
+        assert log_file.exists()
+        content = log_file.read_text()
+        assert "ws_ticket_rejected" in content
+        assert ticket not in content
+        assert ticket[:8] not in content
 
 
 class TestWsRequestIsAllowedGated:

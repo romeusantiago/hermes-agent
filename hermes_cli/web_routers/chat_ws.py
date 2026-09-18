@@ -140,11 +140,11 @@ async def _close_unless_sidecar_allowed(ws: WebSocket) -> bool:
     if not _DASHBOARD_EMBEDDED_CHAT_ENABLED:
         await ws.close(code=4403)
         return False
-    if not _ws_auth_ok(ws):
-        await ws.close(code=4401)
-        return False
     if not _ws_request_is_allowed(ws):
         await ws.close(code=4403)
+        return False
+    if not _ws_auth_ok(ws):
+        await ws.close(code=4401)
         return False
     return True
 
@@ -540,6 +540,10 @@ async def pty_ws(ws: WebSocket) -> None:
 
 @router.websocket("/api/ws")
 async def gateway_ws(ws: WebSocket) -> None:
+    mode = ws.query_params.get("mode", "")
+    if mode not in ("", "read-only"):
+        await ws.close(code=4403)
+        return
     if not await _close_unless_sidecar_allowed(ws):
         return
     from tui_gateway.ws import handle_ws
@@ -551,6 +555,7 @@ async def gateway_ws(ws: WebSocket) -> None:
         ws,
         auth_identity=getattr(ws, "_hermes_auth_identity", None),
         subprotocol=getattr(ws, "_hermes_ws_subprotocol", None),
+        read_only=mode == "read-only",
     )
 
 
